@@ -3,7 +3,7 @@ import collections
 import ast
 import numpy as np
 import pandas as pd
-import cv2
+import scipy.misc
 import sklearn.model_selection
 import tensorflow as tf
 import keras as K
@@ -37,7 +37,7 @@ def get_dataset(*paths, subset=OUTPUT_COLUMNS):
                                       .values.tolist())
         for x in set(subset) & set(IMAGE_COLUMNS):
             log[x] = log[x].str.replace(prefix, path, 1)
-            log[x + '_image'] = log[x].apply(cv2.imread)
+            log[x + '_image'] = log[x].apply(scipy.misc.imread)
 
         full_log = full_log.append(log[subset], ignore_index=True)
 
