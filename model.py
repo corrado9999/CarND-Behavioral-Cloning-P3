@@ -137,7 +137,7 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
     X_train, X_valid, y_train, y_valid = sklearn.model_selection.train_test_split(
         *(sklearn.utils.shuffle(
             np.array(dataset['center_image'].values.tolist()),
-            dataset['steering']),
+            dataset['steering'])),
     )
     model = build_model(X_train[0].shape, name)
     if log_dir:
