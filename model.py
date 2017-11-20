@@ -151,7 +151,7 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
     #    batch_size=batch_size,
     history = model.fit_generator(
         K.preprocessing.image.ImageDataGenerator(width_shift_range=2./X_train.shape[2],
-                                                 height_shift_range=2./X_train.shape[1]).flow(X_train, y_train),
+                                                 height_shift_range=2./X_train.shape[1]).flow(X_train, y_train, batch_size=batch_size),
         len(X_train),
         validation_data=(X_valid, y_valid),
         nb_epoch=epochs,
