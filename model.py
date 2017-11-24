@@ -54,8 +54,33 @@ def get_dataset(*paths, subset=OUTPUT_COLUMNS):
     ])
     return full_log
 
-def build_model(input_shape, name='test', weights=None, params=None, loss='mse', optimizer='adam'):
-    params = infdict(params or {})
+def max_drift(y_true, y_pred):
+    y_true = y_true/180*np.pi
+    y_pred = y_pred/180*np.pi
+    cos_drift = tf.cumsum(K.backend.cos(y_true)) - tf.cumsum(K.backend.cos(y_pred))
+    sin_drift = tf.cumsum(K.backend.sin(y_true)) - tf.cumsum(K.backend.sin(y_pred))
+    abs_drift = K.backend.sqrt(K.backend.square(cos_drift) + K.backend.square(sin_drift))
+    return K.backend.max(abs_drift)
+
+def build_bottleneck(input_shape, name='test', weights=None):
+    preprocessing, layers, _ = get_layers(input_shape, name=name, weights=weights)
+    model = K.models.Sequential(preprocessing + layers)
+    return model
+
+def build_top_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
+    _, _, top = get_layers(input_shape, name=name, weights=weights)
+    input_layer = K.layers.InputLayer(input_shape=input_shape)
+    model = K.models.Sequential([input_shape] + top)
+    model.compile(loss=loss, optimizer=optimizer, metrics=[max_drift])
+    return model
+
+def build_full_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
+    preprocessing, layers, top = get_layers(input_shape, name=name, weights=weights)
+    model = K.models.Sequential(preprocessing + layers + top)
+    model.compile(loss=loss, optimizer=optimizer, metrics=[max_drift])
+    return model
+
+def get_layers(input_shape, name='test', weights=None):
     minsize = dict(
         ResNet50=197,
         VGG16=48,
@@ -95,9 +120,7 @@ def build_model(input_shape, name='test', weights=None, params=None, loss='mse',
                 for y in getattr(x, 'layers', [x]):
                     for z in getattr(y, 'layers', [y]):
                         z.trainable = False
-            layers = [
-                K.layers.InputLayer(input_tensor=base.output),
-            ]
+            layers = base.layers
     with K.backend.name_scope('top'):
         top = [
             K.layers.Flatten(),
@@ -107,11 +130,8 @@ def build_model(input_shape, name='test', weights=None, params=None, loss='mse',
             K.layers.Dense(   8, activation='relu'), K.layers.Dropout(0.9),
             K.layers.Dense(1),
         ]
-    model = K.models.Sequential(preprocessing + layers + top)
-    model.compile(loss=loss, optimizer=optimizer, metrics=['accuracy'])
-    return model
+    return preprocessing, layers, top
 
-#def data_augmentation(X_train, y_train, batch_size=128,
 
 @click.command()
 @click.argument('input_paths',       nargs=-1)
@@ -127,31 +147,46 @@ def build_model(input_shape, name='test', weights=None, params=None, loss='mse',
                                                               'level for keras.Model.fit (0, 1 or '
                                                               '2 times)')
 @click.option('-p', '--params',      default='{}',       help='Dictionary with other parameters')
+@click.option('-B', '--bottlenecks', default=None,       help='Bottlenecks file name (where '
+                                                              'intermediate constant layers are '
+                                                              'saved to or read from)')
 def main(input_paths, name='test', output_path='model.h5', batch_size=128, epochs=10, smooth=0,
-         log_dir=None, params='{}', verbose=0):
+         log_dir=None, params='{}', bottlenecks=None, verbose=0):
     params = ast.literal_eval(params)
     dataset = get_dataset(*input_paths)
     if smooth:
         dataset = dataset.sort_index()
         dataset['steering'] = dataset['steering'].rolling("%s" % smooth).mean()
     X_train, X_valid, y_train, y_valid = sklearn.model_selection.train_test_split(
-        *(sklearn.utils.shuffle(
-            np.array(dataset['center_image'].values.tolist()),
-            dataset['steering'])),
+        np.array(dataset['center_image'].values.tolist()),
+        dataset['steering'],
     )
-    model = build_model(X_train[0].shape, name)
     if log_dir:
         callbacks = [K.callbacks.TensorBoard(log_dir)]
     else:
         callbacks = []
-    print(X_train.shape)
+    if bottlenecks:
+        try:
+            with np.load(bottlenecks) as data:
+                X_train = data['train']
+                X_valid = data['valid']
+        except:
+            print("Cannot read bottlenecks, computing them from scratch")
+            model = build_bottleneck(X_train[0].shape, name)
+            X_train = model.predict(X_train, batch_size=batch_size, verbose=verbose)
+            X_valid = model.predict(X_valid, batch_size=batch_size, verbose=verbose)
+            np.save(bottlenecks, train=X_train, valid=X_valid)
+        model = build_top_model(X_train[0].shape, 'test')
+    else:
+        model = build_full_model(X_train[0].shape, name)
+    generator = K.preprocessing.image.ImageDataGenerator(width_shift_range=2./X_train.shape[2],
+                                                         height_shift_range=2./X_train.shape[1])
     #history = model.fit(
     #    X_train,
     #    y_train,
     #    batch_size=batch_size,
     history = model.fit_generator(
-        K.preprocessing.image.ImageDataGenerator(width_shift_range=2./X_train.shape[2],
-                                                 height_shift_range=2./X_train.shape[1]).flow(X_train, y_train, batch_size=batch_size),
+        generator.flow(X_train, y_train, batch_size=batch_size),
         len(X_train),
         validation_data=(X_valid, y_valid),
         nb_epoch=epochs,
