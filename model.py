@@ -125,17 +125,19 @@ def kronecker(x, y):
         x, y).reshape(np.array(x.shape)*y.shape)
 
 def preprocess(X, minsize, batch_size=None, square=False):
-    print(X.shape)
     X = X[:,50:-20,:,:]
-    print(minsize, X.shape)
     repeats = np.ceil(minsize / np.array(X.shape))
     if square:
         repeats[:] = repeats.max()
     print("Resampling: %r" % (repeats,))
     if not batch_size:
-        batch_size = len(X)
+        return kronecker(X, np.ones(repeats.astype(int)))
     for i in range(0, len(X), batch_size):
         yield kronecker(X[i:i+batch_size], np.ones(repeats.astype(int)))
+
+def preprocess_batches(batches, minsize, square=False):
+    for batch in batches:
+        preprocess(batch, minsize, square)
 
 @click.command()
 @click.argument('input_paths',       nargs=-1)
@@ -162,16 +164,17 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
     if smooth:
         dataset = dataset.sort_index()
         dataset['steering'] = dataset['steering'].rolling("%s" % smooth).mean()
-    X_full = np.array(dataset['center_image'].values.tolist())
 
     X_train, X_valid, y_train, y_valid = sklearn.model_selection.train_test_split(
-        X_full,
+        np.array(dataset['center_image'].values.tolist()),
         dataset['steering'],
     )
     if log_dir:
         callbacks = [K.callbacks.TensorBoard(log_dir)]
     else:
         callbacks = []
+    generator = K.preprocessing.image.ImageDataGenerator(width_shift_range=2./X_train.shape[2],
+                                                         height_shift_range=2./X_train.shape[1])
     if bottlenecks:
         try:
             with np.load(bottlenecks) as data:
@@ -188,8 +191,6 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
         model = build_model(X_train[0].shape, 'test')
     else:
         model = build_model(X_train[0].shape, name, weights=weights)
-    generator = K.preprocessing.image.ImageDataGenerator(width_shift_range=2./X_train.shape[2],
-                                                         height_shift_range=2./X_train.shape[1])
     #history = model.fit(
     #    X_train,
     #    y_train,
