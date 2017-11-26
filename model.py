@@ -16,6 +16,14 @@ IMAGE_COLUMNS = 'center left right'.split()
 LOG_COLUMNS = IMAGE_COLUMNS + 'steering throttle break speed'.split()
 OUTPUT_COLUMNS = 'center center_image steering'.split()
 
+MINSIZE = dict(
+    test=(1, 1, 1, 1),
+    ResNet50=(1, 197, 197, 1),
+    VGG16=(1, 48, 48, 1),
+    VGG19=(1, 48, 48, 1),
+    InceptionV3=(1, 299, 299, 1),
+)
+
 K.backend.name_scope = tf.name_scope
 class infdict(collections.defaultdict):
     def __init__(self, *args, **kwargs):
@@ -63,55 +71,26 @@ def max_drift(y_true, y_pred):
     return K.backend.max(abs_drift)
 
 def build_bottleneck(input_shape, name='test', weights=None):
-    preprocessing, layers, _ = get_layers(input_shape, name=name, weights=weights)
-    model = K.models.Sequential(preprocessing + layers)
+    layers, _ = get_layers(input_shape, name=name, weights=weights)
+    model = K.models.Sequential(layers)
     return model
 
-def build_top_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
-    _, _, top = get_layers(input_shape, name=name, weights=weights)
-    input_layer = K.layers.InputLayer(input_shape=input_shape)
-    model = K.models.Sequential([input_shape] + top)
-    model.compile(loss=loss, optimizer=optimizer, metrics=[max_drift])
-    return model
-
-def build_full_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
-    preprocessing, layers, top = get_layers(input_shape, name=name, weights=weights)
-    model = K.models.Sequential(preprocessing + layers + top)
+def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
+    layers, top = get_layers(input_shape, name=name, weights=weights)
+    model = K.models.Sequential(layers + top)
     model.compile(loss=loss, optimizer=optimizer, metrics=[max_drift])
     return model
 
 def get_layers(input_shape, name='test', weights=None):
-    minsize = dict(
-        ResNet50=197,
-        VGG16=48,
-        VGG19=48,
-        InceptionV3=299,
-    )
-    cropping = [(50,20), (0,0)]
-    for i,(shp,crp) in enumerate(zip(input_shape, cropping)):
-        if shp - sum(crp) < minsize.get(name, 0):
-            cropping[i] = (0,0)
-    middle_shape = [shp-sum(crp) for crp,shp in zip(cropping, input_shape)]
-    padding = [max(minsize.get(name,0)-shp, 0)//2+1 for shp in middle_shape]
-    middle_shape = [shp+pdd*2 for pdd,shp in zip(padding, input_shape)]
-    middle_shape.append(input_shape[2])
-    print("Cropping=%r Padding=%r" % (cropping, padding))
-
     print("Creating network %r" % name)
-    with K.backend.name_scope('preprocessing'):
-        preprocessing = [
-            K.layers.Cropping2D(cropping=cropping, input_shape=input_shape),
-            K.layers.ZeroPadding2D(padding=padding),
-            K.layers.Lambda(lambda x: x/255. - 0.5),
-        ]
     if name=='test':
-        layers = []
+        layers = [K.layers.InputLayer(input_shape=input_shape)]
     else:
         try:
             with K.backend.name_scope(name):
                 base = getattr(K.applications, name)(include_top=False,
                                                      weights=weights,
-                                                     input_shape=middle_shape)
+                                                     input_shape=input_shape)
         except AttributeError:
             raise ValueError("Unknown network: %r" % name)
         else:
@@ -130,8 +109,33 @@ def get_layers(input_shape, name='test', weights=None):
             K.layers.Dense(   8, activation='relu'), K.layers.Dropout(0.9),
             K.layers.Dense(1),
         ]
-    return preprocessing, layers, top
+    return layers, top
 
+def kronecker(x, y):
+    x, y = np.asarray(x), np.asarray(y)
+    if x.ndim < y.ndim:
+        x = x.reshape((1,)*(y.ndim-x.ndim) + x.shape)
+    if y.ndim < x.ndim:
+        y = y.reshape((1,)*(x.ndim-y.ndim) + y.shape)
+    x_subs = 'abcdefghijklmnopqrstuvwxyz'[:x.ndim]
+    y_subs = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[:y.ndim]
+    return np.einsum(
+        '{x},{y}->{xy}'.format(x=x_subs, y=y_subs,
+                               xy=''.join(a+b for a,b in zip(x_subs, y_subs))),
+        x, y).reshape(np.array(x.shape)*y.shape)
+
+def preprocess(X, minsize, batch_size=None, square=False):
+    print(X.shape)
+    X = X[:,50:-20,:,:]
+    print(minsize, X.shape)
+    repeats = np.ceil(minsize / np.array(X.shape))
+    if square:
+        repeats[:] = repeats.max()
+    print("Resampling: %r" % (repeats,))
+    if not batch_size:
+        batch_size = len(X)
+    for i in range(0, len(X), batch_size):
+        yield kronecker(X[i:i+batch_size], np.ones(repeats.astype(int)))
 
 @click.command()
 @click.argument('input_paths',       nargs=-1)
@@ -152,13 +156,16 @@ def get_layers(input_shape, name='test', weights=None):
                                                               'saved to or read from)')
 def main(input_paths, name='test', output_path='model.h5', batch_size=128, epochs=10, smooth=0,
          log_dir=None, params='{}', bottlenecks=None, verbose=0):
+    weights = 'imagenet'
     params = ast.literal_eval(params)
     dataset = get_dataset(*input_paths)
     if smooth:
         dataset = dataset.sort_index()
         dataset['steering'] = dataset['steering'].rolling("%s" % smooth).mean()
+    X_full = np.array(dataset['center_image'].values.tolist())
+
     X_train, X_valid, y_train, y_valid = sklearn.model_selection.train_test_split(
-        np.array(dataset['center_image'].values.tolist()),
+        X_full,
         dataset['steering'],
     )
     if log_dir:
@@ -172,13 +179,15 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
                 X_valid = data['valid']
         except:
             print("Cannot read bottlenecks, computing them from scratch")
-            model = build_bottleneck(X_train[0].shape, name)
-            X_train = model.predict(X_train, batch_size=batch_size, verbose=verbose)
-            X_valid = model.predict(X_valid, batch_size=batch_size, verbose=verbose)
+            model = build_bottleneck(X_train[0].shape, name, weights=weights)
+            X_train = model.predict_generator(preprocess(X_train, MINSIZE[name], batch_size=batch_size),
+                                              batch_size=batch_size, len(X_train), verbose=verbose)
+            X_valid = model.predict_generator(preprocess(X_train, MINSIZE[name], batch_size=batch_size),
+                                              batch_size=batch_size, len(X_valid), verbose=verbose)
             np.save(bottlenecks, train=X_train, valid=X_valid)
-        model = build_top_model(X_train[0].shape, 'test')
+        model = build_model(X_train[0].shape, 'test')
     else:
-        model = build_full_model(X_train[0].shape, name)
+        model = build_model(X_train[0].shape, name, weights=weights)
     generator = K.preprocessing.image.ImageDataGenerator(width_shift_range=2./X_train.shape[2],
                                                          height_shift_range=2./X_train.shape[1])
     #history = model.fit(
