@@ -4,9 +4,11 @@ import ast
 import numpy as np
 import pandas as pd
 import scipy.misc
+import skimage.transform, skimage.color
 import sklearn.model_selection
 import tensorflow as tf
 import keras as K
+import keras.backend
 import keras.applications
 import keras.preprocessing.image
 import click
@@ -14,13 +16,27 @@ import click
 LOG_FILENAME = 'driving_log.csv'
 IMAGE_COLUMNS = 'center left right'.split()
 LOG_COLUMNS = IMAGE_COLUMNS + 'steering throttle break speed'.split()
-OUTPUT_COLUMNS = 'center center_image steering'.split()
+OUTPUT_COLUMNS = 'center center_image left left_image right right_image steering'.split()
 
 K.backend.name_scope = tf.name_scope
+K.backend.constant = tf.constant
 class infdict(collections.defaultdict):
     def __init__(self, *args, **kwargs):
         super().__init__(infdict, *args, **kwargs)
 
+def rgb2yuv(rgb):
+    import numpy as np
+    from keras.backend import dot, floatx
+    from tensorflow import constant
+    Y_WEIGHTS = np.array([ 0.299,  0.587,  0.114])
+    U_WEIGHTS = np.array([0.5 * ((j==2)*1 - Y_WEIGHTS[j]) / (1 - Y_WEIGHTS[2]) for j in range(3)])
+    V_WEIGHTS = np.array([0.5 * ((j==0)*1 - Y_WEIGHTS[j]) / (1 - Y_WEIGHTS[0]) for j in range(3)])
+    RGB2YUV_MATRIX = constant(np.stack([Y_WEIGHTS,
+                                                  U_WEIGHTS,
+                                                  V_WEIGHTS]).T, dtype=floatx())
+    RGB2YUV_BIAS = constant(np.array([-0.5, 0, 0]), dtype=floatx())
+
+    return dot(rgb, RGB2YUV_MATRIX) - RGB2YUV_BIAS
 
 def get_dataset(*paths, subset=OUTPUT_COLUMNS):
     print("Loading data")
@@ -45,17 +61,9 @@ def get_dataset(*paths, subset=OUTPUT_COLUMNS):
         lambda x: pd.Timestamp(**dict(zip('year month day hour minute second microsecond'.split(),
                                           tuple(map(int, x[:-1])) + (int(x[-1])*1000,)))))
 
-    # add flipped images
-    full_log = pd.concat([
-        full_log,
-        pd.DataFrame(dict(center=full_log['center'],
-                          center_image=tuple(np.stack(full_log['center_image'].values)[...,::-1,:]),
-                          steering=-full_log['steering']))
-    ])
     return full_log
 
-def build_model(input_shape, name='test', weights=None, params=None, loss='mse', optimizer='adam'):
-    params = infdict(params or {})
+def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
     minsize = dict(
         ResNet50=197,
         VGG16=48,
@@ -81,6 +89,17 @@ def build_model(input_shape, name='test', weights=None, params=None, loss='mse',
         ]
     if name=='test':
         layers = []
+    elif name.lower()=='nvidia':
+        preprocessing[-1] = K.layers.Lambda(rgb2yuv)
+        with K.backend.name_scope(name):
+            layers = [
+                K.layers.Convolution2D(24, 5, 5, activation='elu', subsample=(2,2)),
+                K.layers.Convolution2D(36, 5, 5, activation='elu', subsample=(2,2)),
+                K.layers.Convolution2D(48, 5, 5, activation='elu', subsample=(2,2)),
+                K.layers.Convolution2D(64, 3, 3, activation='elu'),
+                K.layers.Convolution2D(64, 3, 3, activation='elu'),
+                K.layers.Dropout(0.5),
+            ]
     else:
         try:
             with K.backend.name_scope(name):
@@ -101,17 +120,44 @@ def build_model(input_shape, name='test', weights=None, params=None, loss='mse',
     with K.backend.name_scope('top'):
         top = [
             K.layers.Flatten(),
-            K.layers.Dense( 512, activation='relu'), K.layers.Dropout(0.9),
-            K.layers.Dense( 128, activation='relu'), K.layers.Dropout(0.9),
-            K.layers.Dense(  32, activation='relu'), K.layers.Dropout(0.9),
-            K.layers.Dense(   8, activation='relu'), K.layers.Dropout(0.9),
+            K.layers.Dense( 512, activation='elu'),
+            K.layers.Dense( 128, activation='elu'),
+            K.layers.Dense(  32, activation='elu'),
+            K.layers.Dense(   8, activation='elu'),
             K.layers.Dense(1),
         ]
     model = K.models.Sequential(preprocessing + layers + top)
-    model.compile(loss=loss, optimizer=optimizer, metrics=['accuracy'])
+    model.compile(loss=loss, optimizer=optimizer)
     return model
 
-#def data_augmentation(X_train, y_train, batch_size=128,
+def generate_data(data, batch_size=128, shift=2, rotation=5,
+                  images=['center_image', 'left_image', 'right_image'],
+                  corrections=[0, 0.2, -0.2],
+                  **_
+):
+    shift, rotation = map(abs, [shift, rotation])
+    images, corrections = np.broadcast_arrays(images, corrections)
+    indices = np.arange(len(data))
+    while True:
+        indices = sklearn.utils.shuffle(indices)
+        for i in range(0, len(data), batch_size):
+            batch = data.iloc[indices[i:i+batch_size]]
+            n = len(batch)
+            side = np.random.random_integers(0, len(images)-1, n)
+            sft = np.random.random_integers(-shift, shift, (n, 2))
+            rot = np.random.random_integers(-rotation, rotation, n)
+            flp = np.random.random_integers(0, 1, n)*2 - 1
+            cor = corrections[side] + np.radians(rot) + sft[:,0]*0.002
+            X, y = np.stack(batch[images].values[np.arange(n),side]), np.stack(batch['steering'])
+            X = np.pad([skimage.transform.rotate(np.roll(x, s, (0,1))[shift:-shift, shift:-shift, :],
+                                                 r)[:,::f,:]
+                        for x,r,s,f in zip(X, rot, sft, flp)],
+                       [(0,0), (shift,shift), (shift,shift), (0,0)],
+                       'constant'
+            )
+            print(side, sft, rot, flp, cor, y)
+            y = flp*(y + cor)
+            yield X, y
 
 @click.command()
 @click.argument('input_paths',       nargs=-1)
@@ -119,46 +165,54 @@ def build_model(input_shape, name='test', weights=None, params=None, loss='mse',
 @click.option('-o', '--output_path', default='model.h5', help='Output file name')
 @click.option('-b', '--batch_size',  default=128,        help='The batch size')
 @click.option('-e', '--epochs',      default=10,         help='The number of epochs')
-@click.option('-l', '--log-dir',     default='',         help='Tensorboard directory')
+@click.option('-L', '--log-dir',     default='',         help='Tensorboard directory')
+@click.option('-B', '--save-best',   default=False,      help='Save model when improves validation')
 @click.option('-s', '--smooth',      default='',         help='Time duration for a moving window '
                                                               'averaging on the steering angle '
                                                               '(for smoothing)')
 @click.option('-v', '--verbose',     count=True,         help='Repeat to increas the verbosity '
-                                                              'level for keras.Model.fit (0, 1 or '
-                                                              '2 times)')
+                                                              'level for keras.Model.fit and '
+                                                              'callbacks (0, 1, 2 or 3 times)')
 @click.option('-p', '--params',      default='{}',       help='Dictionary with other parameters')
 def main(input_paths, name='test', output_path='model.h5', batch_size=128, epochs=10, smooth=0,
-         log_dir=None, params='{}', verbose=0):
+         log_dir=None, save_best=False, params='{}', verbose=0):
+    # Params =================================================================
     params = ast.literal_eval(params)
+    weights = params.pop('weights', 'imagenet')
+
+    # Dataset ================================================================
     dataset = get_dataset(*input_paths)
     if smooth:
         dataset = dataset.sort_index()
         dataset['steering'] = dataset['steering'].rolling("%s" % smooth).mean()
-    X_train, X_valid, y_train, y_valid = sklearn.model_selection.train_test_split(
-        *(sklearn.utils.shuffle(
-            np.array(dataset['center_image'].values.tolist()),
-            dataset['steering'])),
-    )
-    model = build_model(X_train[0].shape, name)
+    training_dataset, validation_dataset = sklearn.model_selection.train_test_split(dataset)
+
+    # Model ==================================================================
+    model = build_model(dataset['center_image'].iloc[0].shape, name, weights=weights)
+    callbacks = []
     if log_dir:
-        callbacks = [K.callbacks.TensorBoard(log_dir)]
-    else:
-        callbacks = []
-    print(X_train.shape)
-    #history = model.fit(
-    #    X_train,
-    #    y_train,
-    #    batch_size=batch_size,
-    history = model.fit_generator(
-        K.preprocessing.image.ImageDataGenerator(width_shift_range=2./X_train.shape[2],
-                                                 height_shift_range=2./X_train.shape[1]).flow(X_train, y_train, batch_size=batch_size),
-        len(X_train),
-        validation_data=(X_valid, y_valid),
-        nb_epoch=epochs,
-        callbacks=callbacks,
-        verbose=verbose,
-    )
-    model.save(output_path)
+        callbacks.append(K.callbacks.TensorBoard(log_dir))
+    if save_best:
+        callbacks.append(K.callbacks.ModelCheckpoint(output_path,
+                                                     verbose=verbose-1,
+                                                     save_best_only=True))
+
+    # Training ===============================================================
+    save = True
+    try:
+        history = model.fit_generator(
+            generate_data(training_dataset, batch_size, **params),
+            len(training_dataset),
+            #validation_data=generate_data(validation_dataset, batch_size,
+            #                              **dict(params, images=['center_image'],
+            #                                             corrections=[0])),
+            #nb_val_samples=len(validation_dataset),
+            nb_epoch=epochs,
+            callbacks=callbacks,
+            verbose=verbose,
+        )
+    except KeyboardInterrupt:
+        pass
 
 if __name__=='__main__':
     import gc
