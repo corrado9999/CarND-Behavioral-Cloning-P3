@@ -75,7 +75,7 @@ def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='a
         if shp - sum(crp) < minsize.get(name, 0):
             cropping[i] = (0,0)
     middle_shape = [shp-sum(crp) for crp,shp in zip(cropping, input_shape)]
-    padding = [max(minsize.get(name,0)-shp, 0)//2+1 for shp in middle_shape]
+    padding = [round(0.5 + max(minsize.get(name,0)-shp, 0)/2.) for shp in middle_shape]
     middle_shape = [shp+pdd*2 for pdd,shp in zip(padding, input_shape)]
     middle_shape.append(input_shape[2])
     print("Cropping=%r Padding=%r" % (cropping, padding))
@@ -98,6 +98,7 @@ def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='a
                 K.layers.Convolution2D(48, 5, 5, activation='elu', subsample=(2,2)),
                 K.layers.Convolution2D(64, 3, 3, activation='elu'),
                 K.layers.Convolution2D(64, 3, 3, activation='elu'),
+                K.layers.Convolution2D(64, 3, 3, activation='elu', subsample=(2,2)),
                 K.layers.Dropout(0.5),
             ]
     else:
@@ -155,7 +156,6 @@ def generate_data(data, batch_size=128, shift=2, rotation=5,
                        [(0,0), (shift,shift), (shift,shift), (0,0)],
                        'constant'
             )
-            print(side, sft, rot, flp, cor, y)
             y = flp*(y + cor)
             yield X, y
 
@@ -166,7 +166,7 @@ def generate_data(data, batch_size=128, shift=2, rotation=5,
 @click.option('-b', '--batch_size',  default=128,        help='The batch size')
 @click.option('-e', '--epochs',      default=10,         help='The number of epochs')
 @click.option('-L', '--log-dir',     default='',         help='Tensorboard directory')
-@click.option('-B', '--save-best',   default=False,      help='Save model when improves validation')
+@click.option('-B', '--save-best',   is_flag=False,      help='Save model when improves validation')
 @click.option('-s', '--smooth',      default='',         help='Time duration for a moving window '
                                                               'averaging on the steering angle '
                                                               '(for smoothing)')
@@ -203,10 +203,10 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
         history = model.fit_generator(
             generate_data(training_dataset, batch_size, **params),
             len(training_dataset),
-            #validation_data=generate_data(validation_dataset, batch_size,
-            #                              **dict(params, images=['center_image'],
-            #                                             corrections=[0])),
-            #nb_val_samples=len(validation_dataset),
+            validation_data=generate_data(validation_dataset, batch_size,
+                                          **dict(params, images=['center_image'],
+                                                         corrections=[0])),
+            nb_val_samples=len(validation_dataset),
             nb_epoch=epochs,
             callbacks=callbacks,
             verbose=verbose,
