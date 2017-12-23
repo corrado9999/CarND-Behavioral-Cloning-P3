@@ -134,7 +134,7 @@ def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='a
             K.layers.Dense( 128, activation='elu'),
             K.layers.Dense(  32, activation='elu'),
             K.layers.Dense(   8, activation='elu'),
-            K.layers.Dense(1),
+            K.layers.Dense(   1, activation='softsign'),
         ]
     model = K.models.Sequential(preprocessing + layers + top)
     model.compile(loss=loss, optimizer=optimizer)
@@ -173,8 +173,8 @@ def generate_data(data, batch_size=128, shift=2, rotation=5,
 @click.command()
 @click.argument('input_paths',       nargs=-1)
 @click.option('-n', '--name',        default='test',     help='Name of the Network to use')
-@click.option('-o', '--output_path', default='model.h5', help='Output file name')
-@click.option('-b', '--batch_size',  default=128,        help='The batch size')
+@click.option('-o', '--output-path', default='model.h5', help='Output file name')
+@click.option('-b', '--batch-size',  default=128,        help='The batch size')
 @click.option('-e', '--epochs',      default=10,         help='The number of epochs')
 @click.option('-L', '--log-dir',     default='',         help='Tensorboard directory')
 @click.option('-B', '--save-best',   is_flag=True,       help='Save model when improves validation')
@@ -182,8 +182,8 @@ def generate_data(data, batch_size=128, shift=2, rotation=5,
                                                               'averaging on the steering angle '
                                                               '(for smoothing)')
 @click.option('-v', '--verbose',     count=True,         help='Repeat to increas the verbosity '
-                                                              'level for keras.Model.fit and '
-                                                              'callbacks (0, 1, 2 or 3 times)')
+                                                              'level for keras.Model.fit (0, 1, '
+                                                              'or 2 times)')
 @click.option('-p', '--params',      default='{}',       help='Dictionary with other parameters')
 def main(input_paths, name='test', output_path='model.h5', batch_size=128, epochs=10, smooth=0,
          log_dir=None, save_best=False, params='{}', verbose=0):
@@ -206,11 +206,10 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
         callbacks.append(K.callbacks.TensorBoard(log_dir))
     if save_best:
         callbacks.append(K.callbacks.ModelCheckpoint(output_path,
-                                                     verbose=verbose-1,
+                                                     verbose=1,
                                                      save_best_only=True))
 
     # Training ===============================================================
-    save = True
     try:
         history = model.fit_generator(
             generate_data(training_dataset, batch_size, **params),
