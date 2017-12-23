@@ -31,9 +31,7 @@ def rgb2yuv(rgb):
     Y_WEIGHTS = np.array([ 0.299,  0.587,  0.114])
     U_WEIGHTS = np.array([0.5 * ((j==2)*1 - Y_WEIGHTS[j]) / (1 - Y_WEIGHTS[2]) for j in range(3)])
     V_WEIGHTS = np.array([0.5 * ((j==0)*1 - Y_WEIGHTS[j]) / (1 - Y_WEIGHTS[0]) for j in range(3)])
-    RGB2YUV_MATRIX = constant(np.stack([Y_WEIGHTS,
-                                                  U_WEIGHTS,
-                                                  V_WEIGHTS]).T, dtype=floatx())
+    RGB2YUV_MATRIX = constant(np.stack([Y_WEIGHTS, U_WEIGHTS, V_WEIGHTS]).T, dtype=floatx())
     RGB2YUV_BIAS = constant(np.array([-0.5, 0, 0]), dtype=floatx())
 
     return dot(rgb, RGB2YUV_MATRIX) - RGB2YUV_BIAS
@@ -62,6 +60,17 @@ def get_dataset(*paths, subset=OUTPUT_COLUMNS):
                                           tuple(map(int, x[:-1])) + (int(x[-1])*1000,)))))
 
     return full_log
+
+def reduce_zeros(dataset, factor=4./3, inplace=False):
+    h,b = np.histogram(dataset['steering'], bins=25, range=[-1,1])
+    z = np.searchsorted(b, 0)
+    n = int(h[z-1] - max(h[:z-1].max(), h[z:].max())*factor)
+    return dataset.drop(dataset.loc[(b[z-1] <= dataset['steering']) &
+                                    (dataset['steering'] < b[z])]
+                               .sample(n).index,
+                        axis='rows',
+                        inplace=inplace)
+
 
 def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
     minsize = dict(
@@ -150,7 +159,9 @@ def generate_data(data, batch_size=128, shift=2, rotation=5,
             flp = np.random.random_integers(0, 1, n)*2 - 1
             cor = corrections[side] + np.radians(rot) + sft[:,0]*0.002
             X, y = np.stack(batch[images].values[np.arange(n),side]), np.stack(batch['steering'])
-            X = np.pad([skimage.transform.rotate(np.roll(x, s, (0,1))[shift:-shift, shift:-shift, :],
+            X = np.pad([skimage.transform.rotate(np.roll(x, s, (0,1))[shift:-shift or None,
+                                                                      shift:-shift or None,
+                                                                      :],
                                                  r)[:,::f,:]
                         for x,r,s,f in zip(X, rot, sft, flp)],
                        [(0,0), (shift,shift), (shift,shift), (0,0)],
@@ -166,7 +177,7 @@ def generate_data(data, batch_size=128, shift=2, rotation=5,
 @click.option('-b', '--batch_size',  default=128,        help='The batch size')
 @click.option('-e', '--epochs',      default=10,         help='The number of epochs')
 @click.option('-L', '--log-dir',     default='',         help='Tensorboard directory')
-@click.option('-B', '--save-best',   is_flag=False,      help='Save model when improves validation')
+@click.option('-B', '--save-best',   is_flag=True,       help='Save model when improves validation')
 @click.option('-s', '--smooth',      default='',         help='Time duration for a moving window '
                                                               'averaging on the steering angle '
                                                               '(for smoothing)')
@@ -185,6 +196,7 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
     if smooth:
         dataset = dataset.sort_index()
         dataset['steering'] = dataset['steering'].rolling("%s" % smooth).mean()
+    reduce_zeros(dataset, inplace=True)
     training_dataset, validation_dataset = sklearn.model_selection.train_test_split(dataset)
 
     # Model ==================================================================
