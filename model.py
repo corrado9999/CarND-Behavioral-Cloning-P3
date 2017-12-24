@@ -49,8 +49,10 @@ def get_dataset(*paths, subset=OUTPUT_COLUMNS):
                                       .str.rsplit(os.sep, 2)
                                       .str[0]
                                       .values.tolist())
+        if prefix.endswith('IMG'):
+            prefix = prefix[:-3].strip()
         for x in set(subset) & set(IMAGE_COLUMNS):
-            log[x] = log[x].str.replace(prefix, path, 1)
+            log[x] = log[x].str.strip().str.replace(prefix, path.strip(), 1)
             log[x + '_image'] = log[x].apply(scipy.misc.imread)
 
         full_log = full_log.append(log[subset], ignore_index=True)
