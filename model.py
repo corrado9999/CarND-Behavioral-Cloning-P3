@@ -28,7 +28,7 @@ def rgb2yuv(rgb):
     import numpy as np
     from keras.backend import dot, floatx
     from tensorflow import constant
-    Y_WEIGHTS = np.array([ 0.299,  0.587,  0.114])
+    Y_WEIGHTS = np.array([0.299, 0.587, 0.114])
     U_WEIGHTS = np.array([0.5 * ((j==2)*1 - Y_WEIGHTS[j]) / (1 - Y_WEIGHTS[2]) for j in range(3)])
     V_WEIGHTS = np.array([0.5 * ((j==0)*1 - Y_WEIGHTS[j]) / (1 - Y_WEIGHTS[0]) for j in range(3)])
     RGB2YUV_MATRIX = constant(np.stack([Y_WEIGHTS, U_WEIGHTS, V_WEIGHTS]).T, dtype=floatx())
@@ -67,8 +67,7 @@ def reduce_zeros(dataset, factor=4./3, inplace=False):
     h,b = np.histogram(dataset['steering'], bins=25, range=[-1,1])
     z = np.searchsorted(b, 0)
     n = int(h[z-1] - max(h[:z-1].max(), h[z:].max())*factor)
-    return dataset.drop(dataset.loc[(b[z-1] <= dataset['steering']) &
-                                    (dataset['steering'] < b[z])]
+    return dataset.drop(dataset.loc[dataset['steering'] == 0]
                                .sample(n).index,
                         axis='rows',
                         inplace=inplace)
@@ -81,7 +80,7 @@ def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='a
         VGG19=48,
         InceptionV3=299,
     )
-    cropping = [(50,20), (0,0)]
+    cropping = [(70,24), (0,0)]
     for i,(shp,crp) in enumerate(zip(input_shape, cropping)):
         if shp - sum(crp) < minsize.get(name, 0):
             cropping[i] = (0,0)
@@ -104,12 +103,12 @@ def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='a
         preprocessing[-1] = K.layers.Lambda(rgb2yuv)
         with K.backend.name_scope(name):
             layers = [
-                K.layers.Convolution2D(24, 5, 5, activation='elu', subsample=(2,2)),
+                K.layers.Convolution2D(12, 5, 5,                   subsample=(2,2)),
+                K.layers.Lambda(tf.nn.crelu, output_shape=lambda s: tuple(s[:-1]) + (s[-1]*2,)),
                 K.layers.Convolution2D(36, 5, 5, activation='elu', subsample=(2,2)),
                 K.layers.Convolution2D(48, 5, 5, activation='elu', subsample=(2,2)),
                 K.layers.Convolution2D(64, 3, 3, activation='elu'),
                 K.layers.Convolution2D(64, 3, 3, activation='elu'),
-                K.layers.Convolution2D(64, 3, 3, activation='elu', subsample=(2,2)),
                 K.layers.Dropout(0.5),
             ]
     else:
@@ -198,8 +197,8 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
     if smooth:
         dataset = dataset.sort_index()
         dataset['steering'] = dataset['steering'].rolling("%s" % smooth).mean()
-    reduce_zeros(dataset, inplace=True)
     training_dataset, validation_dataset = sklearn.model_selection.train_test_split(dataset)
+    reduce_zeros(training_dataset, inplace=True)
 
     # Model ==================================================================
     model = build_model(dataset['center_image'].iloc[0].shape, name, weights=weights)
