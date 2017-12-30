@@ -18,20 +18,21 @@ IMAGE_COLUMNS = 'center left right'.split()
 LOG_COLUMNS = IMAGE_COLUMNS + 'steering throttle break speed'.split()
 OUTPUT_COLUMNS = 'center center_image left left_image right right_image steering'.split()
 
+# Expose some Tensorflow functions as Keras ===================================
 K.backend.name_scope = tf.name_scope
 K.backend.constant = tf.constant
-class infdict(collections.defaultdict):
-    def __init__(self, *args, **kwargs):
-        super().__init__(infdict, *args, **kwargs)
 
 def crelu(x):
+    # Local import, because otherwise drive.py will fail the model restoration
     import tensorflow as tf
     return tf.nn.crelu(x)
 
 def get_crelu_output_shape(input_shape):
     return tuple(input_shape[:-1]) + (input_shape[-1]*2,)
 
+# New function for preprocessing ==============================================
 def rgb2yuv(rgb):
+    # Local import, because otherwise drive.py will fail the model restoration
     import numpy as np
     from keras.backend import dot, floatx
     from tensorflow import constant
@@ -43,6 +44,7 @@ def rgb2yuv(rgb):
 
     return dot(rgb, RGB2YUV_MATRIX) - RGB2YUV_BIAS
 
+# Dataset loading and cleaning ================================================
 def get_dataset(*paths, subset=OUTPUT_COLUMNS):
     print("Loading data")
     full_log = pd.DataFrame(columns=subset)
@@ -80,75 +82,33 @@ def reduce_zeros(dataset, factor=4./3, inplace=False):
                         axis='rows',
                         inplace=inplace)
 
-
-def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='adam'):
-    minsize = dict(
-        ResNet50=197,
-        VGG16=48,
-        VGG19=48,
-        InceptionV3=299,
-    )
+# Build model =================================================================
+def build_model(input_shape, loss='mse', optimizer='adam'):
     cropping = [(70,24), (0,0)]
-    for i,(shp,crp) in enumerate(zip(input_shape, cropping)):
-        if shp - sum(crp) < minsize.get(name, 0):
-            cropping[i] = (0,0)
-    middle_shape = [shp-sum(crp) for crp,shp in zip(cropping, input_shape)]
-    padding = [round(0.5 + max(minsize.get(name,0)-shp, 0)/2.) for shp in middle_shape]
-    middle_shape = [shp+pdd*2 for pdd,shp in zip(padding, input_shape)]
-    middle_shape.append(input_shape[2])
-    print("Cropping=%r Padding=%r" % (cropping, padding))
-
-    print("Creating network %r" % name)
+    print("Creating network (cropping=%r)" % (cropping,))
+    model = K.models.Sequential()
     with K.backend.name_scope('preprocessing'):
-        preprocessing = [
-            K.layers.Cropping2D(cropping=cropping, input_shape=input_shape),
-            K.layers.ZeroPadding2D(padding=padding),
-            K.layers.Lambda(lambda x: x/255. - 0.5),
-        ]
-    if name=='test':
-        layers = []
-    elif name.lower()=='nvidia':
-        preprocessing[-1] = K.layers.Lambda(rgb2yuv)
-        with K.backend.name_scope(name):
-            layers = [
-                K.layers.Convolution2D(12, 5, 5,                   subsample=(2,2)),
-                K.layers.Lambda(crelu, output_shape=get_crelu_output_shape),
-                K.layers.Convolution2D(36, 5, 5, activation='elu', subsample=(2,2)),
-                K.layers.Convolution2D(48, 5, 5, activation='elu', subsample=(2,2)),
-                K.layers.Convolution2D(64, 3, 3, activation='elu'),
-                K.layers.Convolution2D(64, 3, 3, activation='elu'),
-                K.layers.Dropout(0.5),
-            ]
-    else:
-        try:
-            with K.backend.name_scope(name):
-                base = getattr(K.applications, name)(include_top=False,
-                                                     weights=weights,
-                                                     input_shape=middle_shape)
-        except AttributeError:
-            raise ValueError("Unknown network: %r" % name)
-        else:
-            #base may contain Merge layers, which must be traversed into
-            for x in base.layers:
-                for y in getattr(x, 'layers', [x]):
-                    for z in getattr(y, 'layers', [y]):
-                        z.trainable = False
-            layers = [
-                K.layers.InputLayer(input_tensor=base.output),
-            ]
+        model.add(K.layers.Cropping2D(cropping=cropping, input_shape=input_shape, name='Cropping'))
+        model.add(K.layers.Lambda(rgb2yuv, name='rgb2yuv'))
+    with K.backend.name_scope('convolutional'):
+        model.add(K.layers.Convolution2D(12, 5, 5, name='Conv1',                   subsample=(2,2)))
+        model.add(K.layers.Lambda(crelu, name='CReLU', output_shape=get_crelu_output_shape))
+        model.add(K.layers.Convolution2D(36, 5, 5, name='Conv2', activation='elu', subsample=(2,2)))
+        model.add(K.layers.Convolution2D(48, 5, 5, name='Conv3', activation='elu', subsample=(2,2)))
+        model.add(K.layers.Convolution2D(64, 3, 3, name='Conv4', activation='elu'))
+        model.add(K.layers.Convolution2D(64, 3, 3, name='Conv5', activation='elu'))
+        model.add(K.layers.Dropout(0.5, name='Dropout-0.5'))
     with K.backend.name_scope('top'):
-        top = [
-            K.layers.Flatten(),
-            K.layers.Dense( 512, activation='elu'),
-            K.layers.Dense( 128, activation='elu'),
-            K.layers.Dense(  32, activation='elu'),
-            K.layers.Dense(   8, activation='elu'),
-            K.layers.Dense(   1, activation='softsign'),
-        ]
-    model = K.models.Sequential(preprocessing + layers + top)
+        model.add(K.layers.Flatten(name='Flatten'))
+        model.add(K.layers.Dense( 512, name='Dense1', activation='elu'))
+        model.add(K.layers.Dense( 128, name='Dense2', activation='elu'))
+        model.add(K.layers.Dense(  32, name='Dense3', activation='elu'))
+        model.add(K.layers.Dense(   8, name='Dense4', activation='elu'))
+        model.add(K.layers.Dense(   1, name='Dense5', activation='softsign'))
     model.compile(loss=loss, optimizer=optimizer)
     return model
 
+# Image generator for data augmentation =======================================
 def generate_data(data, batch_size=128, shift=2, rotation=5,
                   images=['center_image', 'left_image', 'right_image'],
                   corrections=[0, 0.2, -0.2],
@@ -162,26 +122,34 @@ def generate_data(data, batch_size=128, shift=2, rotation=5,
         for i in range(0, len(data), batch_size):
             batch = data.iloc[indices[i:i+batch_size]]
             n = len(batch)
+            # randomly select camera, shift, rotation and flip
             side = np.random.random_integers(0, len(images)-1, n)
             sft = np.random.random_integers(-shift, shift, (n, 2))
             rot = np.random.random_integers(-rotation, rotation, n)
             flp = np.random.random_integers(0, 1, n)*2 - 1
+            # calculate correction to be applied to the steering angle in order
+            # to take into account the applied distortions
             cor = corrections[side] + np.radians(rot) + sft[:,0]*0.002
-            X, y = np.stack(batch[images].values[np.arange(n),side]), np.stack(batch['steering'])
-            X = np.pad([skimage.transform.rotate(np.roll(x, s, (0,1))[shift:-shift or None,
-                                                                      shift:-shift or None,
-                                                                      :],
-                                                 r)[:,::f,:]
-                        for x,r,s,f in zip(X, rot, sft, flp)],
-                       [(0,0), (shift,shift), (shift,shift), (0,0)],
-                       'constant'
-            )
+            # extract batch
+            X = np.stack(batch[images].values[np.arange(n),side])
+            y = np.stack(batch['steering'])
+            # for each image, apply the corresponding random shift, rotation
+            # and flip in this order
+            X = np.stack([
+                skimage.transform.rotate(
+                    np.pad(x, [(max(0,ss),-min(0,ss)) for ss in s] + [(0,0)],
+                              'constant')
+                    .__getitem__([slice(-min(0,ss), -max(0,ss) or None)
+                                  for ss in s]),
+				    r)
+                    [:,::f,:]
+                for x,r,s,f in zip(X, rot, sft, flp)
+            ])
             y = flp*(y + cor)
             yield X, y
 
 @click.command()
 @click.argument('input_paths',       nargs=-1)
-@click.option('-n', '--name',        default='test',     help='Name of the Network to use')
 @click.option('-o', '--output-path', default='model.h5', help='Output file name')
 @click.option('-b', '--batch-size',  default=128,        help='The batch size')
 @click.option('-e', '--epochs',      default=10,         help='The number of epochs')
@@ -198,7 +166,6 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
          log_dir=None, save_best=False, params='{}', verbose=0):
     # Params =================================================================
     params = ast.literal_eval(params)
-    weights = params.pop('weights', 'imagenet')
 
     # Dataset ================================================================
     dataset = get_dataset(*input_paths)
@@ -209,7 +176,7 @@ def main(input_paths, name='test', output_path='model.h5', batch_size=128, epoch
     reduce_zeros(training_dataset, inplace=True)
 
     # Model ==================================================================
-    model = build_model(dataset['center_image'].iloc[0].shape, name, weights=weights)
+    model = build_model(dataset['center_image'].iloc[0].shape)
     callbacks = []
     if log_dir:
         callbacks.append(K.callbacks.TensorBoard(log_dir))
