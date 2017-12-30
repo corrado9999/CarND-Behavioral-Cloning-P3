@@ -24,6 +24,13 @@ class infdict(collections.defaultdict):
     def __init__(self, *args, **kwargs):
         super().__init__(infdict, *args, **kwargs)
 
+def crelu(x):
+    import tensorflow as tf
+    return tf.nn.crelu(x)
+
+def get_crelu_output_shape(input_shape):
+    return tuple(input_shape[:-1]) + (input_shape[-1]*2,)
+
 def rgb2yuv(rgb):
     import numpy as np
     from keras.backend import dot, floatx
@@ -67,7 +74,8 @@ def reduce_zeros(dataset, factor=4./3, inplace=False):
     h,b = np.histogram(dataset['steering'], bins=25, range=[-1,1])
     z = np.searchsorted(b, 0)
     n = int(h[z-1] - max(h[:z-1].max(), h[z:].max())*factor)
-    return dataset.drop(dataset.loc[dataset['steering'] == 0]
+    return dataset.drop(dataset.loc[(dataset['steering']>b[z-1]) &
+                                    (dataset['steering']<b[z])]
                                .sample(n).index,
                         axis='rows',
                         inplace=inplace)
@@ -104,7 +112,7 @@ def build_model(input_shape, name='test', weights=None, loss='mse', optimizer='a
         with K.backend.name_scope(name):
             layers = [
                 K.layers.Convolution2D(12, 5, 5,                   subsample=(2,2)),
-                K.layers.Lambda(tf.nn.crelu, output_shape=lambda s: tuple(s[:-1]) + (s[-1]*2,)),
+                K.layers.Lambda(crelu, output_shape=get_crelu_output_shape),
                 K.layers.Convolution2D(36, 5, 5, activation='elu', subsample=(2,2)),
                 K.layers.Convolution2D(48, 5, 5, activation='elu', subsample=(2,2)),
                 K.layers.Convolution2D(64, 3, 3, activation='elu'),
