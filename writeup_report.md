@@ -82,7 +82,8 @@ I decided to introduce some modifications to the model, because my training data
 
 The final step was to run the simulator to see how well the car was driving around track one. The bridge was a critical point. Even if most of the the model was able to drive all the way through, when exiting the bridge it turned either left or right leaving the lane or stucking into the wall. To overcome this issue I recorded some more training data explicitly taken on the bridge, in both the directions. This permitted the model to learn how to deal properly with it.
 
-At the end of the process, the vehicle is able to drive autonomously around the track without leaving the road. The driving is not perfectly straight, especially in some parts of the track, but it remains most of time roughly in the center of the lane and it never crosses the side lane lines.
+At the end of the process, the vehicle is able to drive autonomously around the track without leaving the road. The driving is not perfectly straight, especially in some parts of the track, but it remains most of time roughly in the center of the lane and it never crosses the side lane lines. I recorded two consecutive laps of autonomous driving in the directory test-run. Here is the video:
+<video controls src="test-run/track1.mp4" type="video/mp4"/>
 
 #### 2. Final Model Architecture
 
